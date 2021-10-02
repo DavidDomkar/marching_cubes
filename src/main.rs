@@ -51,7 +51,17 @@ fn main() {
 }
 
 fn value_from_noise(noise: noise::Perlin, translation: Vec3) -> f32 {
-    (noise.get([translation.x as f64 / 50.0, translation.y as f64 / 50.0, translation.z as f64 / 50.0]) * 2.0) as f32
+    let mut value = (noise.get([translation.x as f64 / 50.0, translation.y as f64 / 50.0, translation.z as f64 / 50.0]) * 2.0) as f32;
+
+    if value > 1.0 {
+        value = 1.0;
+    }
+
+    if value < 0.0 {
+        value = 0.0;
+    }
+
+    value
 }
 
 fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {

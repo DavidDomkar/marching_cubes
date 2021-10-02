@@ -5,3 +5,4 @@ edition = "2018"
 
 [dependencies]
 bevy = { path = "../bevy" }
+noise = "0.7.0"

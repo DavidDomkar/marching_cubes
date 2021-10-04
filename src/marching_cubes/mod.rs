@@ -386,7 +386,6 @@ pub fn polygonise(grid: [(Vec3, f32); 8], iso_level: f32) -> Vec<Triangle> {
 }
 
 fn interpolate_vertex(iso_level: f32, a: &(Vec3, f32), b: &(Vec3, f32)) -> Vec3 {
-    /*
     if (iso_level - a.1).abs() < f32::EPSILON {
         return a.0;
     }
@@ -407,7 +406,6 @@ fn interpolate_vertex(iso_level: f32, a: &(Vec3, f32), b: &(Vec3, f32)) -> Vec3 
     let z = a.0.z + mu * (b.0.z - a.0.z);
 
     return Vec3::new(x, y, z);
-    */
 
-    (a.0 + b.0) / Vec3::new(2.0, 2.0, 2.0)
+    // (a.0 + b.0) / Vec3::new(2.0, 2.0, 2.0)
 }

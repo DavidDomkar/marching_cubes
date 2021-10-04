@@ -1,6 +1,10 @@
 mod marching_cubes;
 mod plugins;
 
+use bevy::render2::renderer::RenderQueue;
+use bevy::render2::render_resource::*;
+use bevy::render2::shader::Shader;
+use bevy::render2::renderer::RenderDevice;
 use bevy::ecs::query::With;
 use bevy::asset::Handle;
 use bevy::ecs::system::Query;
@@ -64,6 +68,7 @@ fn main() {
         .add_plugins(PipelinedDefaultPlugins)
         .add_plugin(NoCameraPlayerPlugin)
         .add_startup_system(setup)
+        .add_startup_system(gpu_setup)
         .add_system(update)
         .run();
 }
@@ -163,10 +168,90 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
         }).insert(FlyCam);
 }
 
-fn update(time: Res<Time>, mut meshes: ResMut<Assets<Mesh>>, mut query: Query<&mut Handle<Mesh>, With<WorldMesh>>, perlin: Res<Perlin>) {
-    for mut mesh in &mut query.iter_mut() {
-        // println!("{:?}", mesh.id);
+fn gpu_setup(render_device: Res<RenderDevice>, render_queue: Res<RenderQueue>) {
+    let shader = Shader::from_wgsl(include_str!("../assets/shader.wgsl"));
+    let shader_module = render_device.create_shader_module(&shader);
 
+    let buffer = render_device.create_buffer(&BufferDescriptor {
+        label: None,
+        usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+        mapped_at_creation: false,
+        size : std::mem::size_of::<u32>() as BufferAddress,
+    });
+
+    let bind_group_layout = render_device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStage::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage {
+                        read_only: false,
+                    },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+
+    let bind_group = render_device.create_bind_group(&BindGroupDescriptor {
+        label: None,
+        layout: &bind_group_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    let pipeline_layout = render_device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: None,
+        push_constant_ranges: &[],
+        bind_group_layouts: &[&bind_group_layout],
+    });
+
+    let compute_pipeline = render_device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: None,
+        layout: Some(&pipeline_layout),
+        module: &shader_module,
+        entry_point: "main",
+    });
+
+    let mut command_encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
+        label: None,
+    });
+
+    {
+        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: None,
+        });
+    
+        compute_pass.set_pipeline(&compute_pipeline);
+        compute_pass.set_bind_group(0, bind_group.value(), &[]);
+    
+        compute_pass.dispatch(1, 1, 1);    
+    }
+
+    let read_buffer = render_device.create_buffer(&BufferDescriptor {
+        label: None,
+        usage: BufferUsage::COPY_DST | BufferUsage::MAP_READ,
+        mapped_at_creation: false,
+        size : std::mem::size_of::<u32>() as BufferAddress,
+    });
+
+    command_encoder.copy_buffer_to_buffer(&buffer, 0, &read_buffer, 0, std::mem::size_of::<u32>() as BufferAddress);
+
+    let gpu_commands = command_encoder.finish();
+
+    render_queue.submit([gpu_commands]);
+}
+
+fn update(time: Res<Time>, mut meshes: ResMut<Assets<Mesh>>, mut query: Query<&mut Handle<Mesh>, With<WorldMesh>>, perlin: Res<Perlin>) {
+    for mesh in &mut query.iter_mut() {
         let mesh = meshes.get_mut(&*mesh).unwrap();
 
         let triangles = generate_triangles(&perlin, time.seconds_since_startup() as f32 * Vec3::new(10.0, 10.0, 10.0));
@@ -194,16 +279,6 @@ fn update(time: Res<Time>, mut meshes: ResMut<Assets<Mesh>>, mut query: Query<&m
         mesh.set_attribute(Mesh::ATTRIBUTE_POSITION, vertices);
         mesh.set_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
         mesh.set_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-
-        /*
-        mesh.set_attribute(Mesh::ATTRIBUTE_NORMAL, mesh.get_attribute(Mesh::ATTRIBUTE_NORMAL).unwrap().iter().map(|normal| {
-            let mut normal = Vec3::from(normal);
-
-            normal.y = 0.0;
-
-            normal.normalize()
-        }).collect::<Vec<_>>());
-        */
     }
 
     time.delta_seconds();

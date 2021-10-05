@@ -1,6 +1,9 @@
 mod marching_cubes;
 mod plugins;
 
+use bevy::tasks::Task;
+use bevy::ecs::entity::Entity;
+use bevy::tasks::AsyncComputeTaskPool;
 use bevy::render2::renderer::RenderQueue;
 use bevy::render2::render_resource::*;
 use bevy::render2::shader::Shader;
@@ -16,6 +19,9 @@ use noise::OpenSimplex;
 use crate::plugins::NoCameraPlayerPlugin;
 use crate::plugins::FlyCam;
 use noise::{NoiseFn, Perlin, Seedable};
+use bytemuck;
+
+use futures_lite::future;
 
 use crate::marching_cubes::*;
 
@@ -52,6 +58,8 @@ fn main() {
 
     perlin.set_seed(5225);
 
+    let read_buffer: Option<Buffer> = None; 
+
     App::new()
         .insert_resource(WindowDescriptor {
             width: 1920.0,
@@ -65,11 +73,13 @@ fn main() {
             ..Default::default()
         })
         .insert_resource(perlin)
+        .insert_resource(read_buffer)
         .add_plugins(PipelinedDefaultPlugins)
         .add_plugin(NoCameraPlayerPlugin)
-        .add_startup_system(setup)
+        // .add_startup_system(setup)
         .add_startup_system(gpu_setup)
-        .add_system(update)
+        // .add_system(update)
+        .add_system(gpu_update)
         .run();
 }
 
@@ -80,10 +90,10 @@ fn value_from_noise(noise: noise::Perlin, translation: Vec3) -> f32 {
 fn generate_triangles(perlin: &noise::Perlin, translation_offset: Vec3) -> Vec<Triangle> {
     let mut triangles: Vec<Triangle> = Vec::new();
 
-    let cell_size = 5.0;
+    let cell_size = 2.5;
     let iso_level = 0.7;
 
-    let number_of_cells = 10;
+    let number_of_cells = 100;
 
     let perlin = *perlin;
 
@@ -168,15 +178,15 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
         }).insert(FlyCam);
 }
 
-fn gpu_setup(render_device: Res<RenderDevice>, render_queue: Res<RenderQueue>) {
+fn gpu_setup(mut commands: Commands, render_device: Res<RenderDevice>, render_queue: Res<RenderQueue>, thread_pool: Res<AsyncComputeTaskPool>, mut read_buffer_option: ResMut<Option<Buffer>>) {
     let shader = Shader::from_wgsl(include_str!("../assets/shader.wgsl"));
     let shader_module = render_device.create_shader_module(&shader);
 
     let buffer = render_device.create_buffer(&BufferDescriptor {
         label: None,
-        usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+        usage: BufferUsage::STORAGE | BufferUsage::COPY_SRC,
         mapped_at_creation: false,
-        size : std::mem::size_of::<u32>() as BufferAddress,
+        size: (std::mem::size_of::<u32>() * 4) as BufferAddress,
     });
 
     let bind_group_layout = render_device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -233,21 +243,55 @@ fn gpu_setup(render_device: Res<RenderDevice>, render_queue: Res<RenderQueue>) {
         compute_pass.set_pipeline(&compute_pipeline);
         compute_pass.set_bind_group(0, bind_group.value(), &[]);
     
-        compute_pass.dispatch(1, 1, 1);    
+        compute_pass.dispatch(2, 1, 1);    
     }
 
     let read_buffer = render_device.create_buffer(&BufferDescriptor {
         label: None,
         usage: BufferUsage::COPY_DST | BufferUsage::MAP_READ,
         mapped_at_creation: false,
-        size : std::mem::size_of::<u32>() as BufferAddress,
+        size: (std::mem::size_of::<u32>() * 4) as BufferAddress,
     });
 
-    command_encoder.copy_buffer_to_buffer(&buffer, 0, &read_buffer, 0, std::mem::size_of::<u32>() as BufferAddress);
+    command_encoder.copy_buffer_to_buffer(&buffer, 0, &read_buffer, 0, (std::mem::size_of::<u32>() * 4) as BufferAddress);
 
     let gpu_commands = command_encoder.finish();
 
     render_queue.submit([gpu_commands]);
+
+    let buffer_slice = read_buffer.slice(..);
+
+    let buffer_future = buffer_slice.map_async(MapMode::Read);
+
+    let task = thread_pool.spawn(buffer_future);
+
+    commands.spawn().insert(task);
+
+    *read_buffer_option = Some(read_buffer);
+}
+
+fn gpu_update(mut commands: Commands, mut compute_tasks: Query<(Entity, &mut Task<Result<(), BufferAsyncError>>)>, read_buffer: Res<Option<Buffer>>) {
+    for (entity, mut task) in compute_tasks.iter_mut() {
+        if let Some(_) = future::block_on(future::poll_once(&mut *task)) {
+
+            if let Some(buffer) = &*read_buffer {
+                let buffer_slice = buffer.slice(..);
+
+                let data = buffer_slice.get_mapped_range();
+
+                println!("{:?}", data.as_ref());
+
+                let result: &[u32] = bytemuck::cast_slice(&data);
+
+                println!("{:?}", result);
+
+                drop(data);
+                buffer.unmap();
+            }
+
+            commands.entity(entity).remove::<Task<Result<(), BufferAsyncError>>>();
+        }
+    }
 }
 
 fn update(time: Res<Time>, mut meshes: ResMut<Assets<Mesh>>, mut query: Query<&mut Handle<Mesh>, With<WorldMesh>>, perlin: Res<Perlin>) {

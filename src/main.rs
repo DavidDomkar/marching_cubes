@@ -179,6 +179,10 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
 }
 
 fn gpu_setup(mut commands: Commands, render_device: Res<RenderDevice>, render_queue: Res<RenderQueue>, thread_pool: Res<AsyncComputeTaskPool>, mut read_buffer_option: ResMut<Option<Buffer>>) {
+    let number_of_cells = 128;
+
+    let output_buffer_size = number_of_cells * number_of_cells * number_of_cells * 5 * 3;
+    
     let shader = Shader::from_wgsl(include_str!("../assets/shader.wgsl"));
     let shader_module = render_device.create_shader_module(&shader);
 
@@ -186,7 +190,7 @@ fn gpu_setup(mut commands: Commands, render_device: Res<RenderDevice>, render_qu
         label: None,
         usage: BufferUsage::STORAGE | BufferUsage::COPY_SRC,
         mapped_at_creation: false,
-        size: (std::mem::size_of::<u32>() * 4) as BufferAddress,
+        size: output_buffer_size as BufferAddress,
     });
 
     let bind_group_layout = render_device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -243,17 +247,17 @@ fn gpu_setup(mut commands: Commands, render_device: Res<RenderDevice>, render_qu
         compute_pass.set_pipeline(&compute_pipeline);
         compute_pass.set_bind_group(0, bind_group.value(), &[]);
     
-        compute_pass.dispatch(2, 1, 1);    
+        compute_pass.dispatch(number_of_cells / 8, number_of_cells / 8, number_of_cells / 8);
     }
 
     let read_buffer = render_device.create_buffer(&BufferDescriptor {
         label: None,
         usage: BufferUsage::COPY_DST | BufferUsage::MAP_READ,
         mapped_at_creation: false,
-        size: (std::mem::size_of::<u32>() * 4) as BufferAddress,
+        size: output_buffer_size as BufferAddress,
     });
 
-    command_encoder.copy_buffer_to_buffer(&buffer, 0, &read_buffer, 0, (std::mem::size_of::<u32>() * 4) as BufferAddress);
+    command_encoder.copy_buffer_to_buffer(&buffer, 0, &read_buffer, 0, output_buffer_size as BufferAddress);
 
     let gpu_commands = command_encoder.finish();
 
@@ -279,11 +283,9 @@ fn gpu_update(mut commands: Commands, mut compute_tasks: Query<(Entity, &mut Tas
 
                 let data = buffer_slice.get_mapped_range();
 
-                println!("{:?}", data.as_ref());
+                let result: &[f32] = bytemuck::cast_slice(&data);
 
-                let result: &[u32] = bytemuck::cast_slice(&data);
-
-                println!("{:?}", result);
+                println!("{:?}", result[0]);
 
                 drop(data);
                 buffer.unmap();

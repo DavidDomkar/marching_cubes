@@ -2,9 +2,11 @@
 name = "marching_cubes"
 version = "0.1.0"
 edition = "2018"
+resolver = "2"
 
 [dependencies]
 bevy = { path = "../bevy" }
+bevy-inspector-egui = { path = "../bevy-inspector-egui" }
 noise = "0.7.0"
 futures-lite = "1.12.0"
 bytemuck = "1.7.2"

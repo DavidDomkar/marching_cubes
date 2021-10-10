@@ -2058,6 +2058,7 @@ dependencies = [
  "bevy",
  "bevy-inspector-egui",
  "bytemuck",
+ "crevice",
  "futures-lite",
  "noise",
 ]

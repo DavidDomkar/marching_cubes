@@ -7,6 +7,7 @@ resolver = "2"
 [dependencies]
 bevy = { path = "../bevy" }
 bevy-inspector-egui = { path = "../bevy-inspector-egui" }
+crevice = { path = "../bevy/crates/crevice", version = "0.6.0" }
 noise = "0.7.0"
 futures-lite = "1.12.0"
 bytemuck = "1.7.2"

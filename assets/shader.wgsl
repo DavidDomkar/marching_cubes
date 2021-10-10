@@ -1,4 +1,4 @@
-var<workgroup> EDGE_TABLE: array<u32, 256> = array<u32, 256>(
+var<private> EDGE_TABLE: array<u32, 256> = array<u32, 256>(
     0u,    265u,  515u,  778u,  1030u, 1295u, 1541u, 1804u,
     2060u, 2309u, 2575u, 2822u, 3082u, 3331u, 3593u, 3840u,
     400u,  153u,  915u,  666u,  1430u, 1183u, 1941u, 1692u,
@@ -30,10 +30,10 @@ var<workgroup> EDGE_TABLE: array<u32, 256> = array<u32, 256>(
     3728u, 3993u, 3219u, 3482u, 2710u, 2975u, 2197u, 2460u,
     1692u, 1941u, 1183u, 1430u, 666u,  915u,  153u,  400u,
     3840u, 3593u, 3331u, 3082u, 2822u, 2575u, 2309u, 2060u,
-    1804u, 1541u, 1295u, 1030u, 778u,  515u,  265u,  0u
+    1804u, 1541u, 1295u, 1030u, 778u,  515u,  265u,  0u,
 );
 
-var<workgroup> TRI_TABLE: array<array<i32, 16>, 256> = array<array<i32, 16>, 256>(
+var<private> TRI_TABLE: array<array<i32, 16>, 256> = array<array<i32, 16>, 256>(
     array<i32, 16>(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1),
     array<i32, 16>(0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1),
     array<i32, 16>(0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1),
@@ -289,13 +289,11 @@ var<workgroup> TRI_TABLE: array<array<i32, 16>, 256> = array<array<i32, 16>, 256
     array<i32, 16>(1, 3, 8, 9, 1, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1),
     array<i32, 16>(0, 9, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1),
     array<i32, 16>(0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1),
-    array<i32, 16>(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1)
+    array<i32, 16>(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1),
 );
 
-[[block]]
-struct Output {
-    data: [[stride(4)]] array<f32>;
-};
+var<private> CORNER_INDEX_A_FROM_EDGE: array<u32, 12> = array<u32, 12>(0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 0u, 1u, 2u, 3u);
+var<private> CORNER_INDEX_B_FROM_EDGE: array<u32, 12> = array<u32, 12>(1u, 2u, 3u, 0u, 5u, 6u, 7u, 4u, 4u, 5u, 6u, 7u);
 
 struct Triangle {
     a: vec3<f32>;
@@ -303,42 +301,82 @@ struct Triangle {
     c: vec3<f32>;
 };
 
-struct Point {
-    position: vec3<f32>;
-    value: f32;
+struct Cube {
+    triangle_count: u32;
+    triangles: array<Triangle, 5>;
+};
+
+[[block]]
+struct Output {
+    data: array<Cube>;
 };
 
 [[group(0), binding(0)]]
-var<storage, read_write> test: Output;
+var<storage, read_write> output: Output;
 
-[[stage(compute), workgroup_size(8, 8, 8)]]
-fn main([[builtin(global_invocation_id)]] global_id: vec3<u32>) {
-    test.data[global_id.x] = 5.0;
+fn interpolate_vertices(a: vec4<f32>, b: vec4<f32>, iso_level: f32) -> vec3<f32> {
+    var t = (iso_level - a.w) / (b.w - a.w);
+
+    return a.xyz + t * (b.xyz - a.xyz);
+
+    // return (a.xyz + b.xyz) / vec3<f32>(2.0, 2.0, 2.0);
 }
 
-fn polygonise(grid_cell: array<Point, 8>, iso_level: f32) -> array<Triangle, 5> {
-    var cube_index: u32 = 0u;
+fn value_from_coord(x: u32, y: u32, z: u32) -> vec4<f32> {
+    return vec4<f32>(f32(x), f32(y), f32(z), distance(vec3<f32>(32.0, 32.0, 32.0), vec3<f32>(f32(x), f32(y), f32(z))) / sqrt(64.0 * 64.0 + 64.0 * 64.0));
+}
 
-    if (grid_cell[0].value < iso_level) { cube_index = cube_index | 1u; }
-    if (grid_cell[1].value < iso_level) { cube_index = cube_index | 2u; }
-    if (grid_cell[2].value < iso_level) { cube_index = cube_index | 4u; }
-    if (grid_cell[3].value < iso_level) { cube_index = cube_index | 8u; }
-    if (grid_cell[4].value < iso_level) { cube_index = cube_index | 16u; }
-    if (grid_cell[5].value < iso_level) { cube_index = cube_index | 32u; }
-    if (grid_cell[6].value < iso_level) { cube_index = cube_index | 64u; }
-    if (grid_cell[7].value < iso_level) { cube_index = cube_index | 128u; }
+fn index_from_id(id: vec3<u32>) -> u32 {
+    return id.z * 64u * 64u + id.y * 64u + id.x;
+}
 
-    if (EDGE_TABLE[cube_index] == 0u) {
-        
-    }
-
-    var triangles: array<Triangle, 5> = array<Triangle, 5>(
-        Triangle(vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 0.0)),
-        Triangle(vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 0.0)),
-        Triangle(vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 0.0)),
-        Triangle(vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 0.0)),
-        Triangle(vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 0.0)),
+[[stage(compute), workgroup_size(8, 8, 8)]]
+fn main([[builtin(global_invocation_id)]] id: vec3<u32>) {
+    var cube_corners: array<vec4<f32>, 8> = array<vec4<f32>, 8>(
+        value_from_coord(id.x, id.y, id.z),
+        value_from_coord(id.x + 1u, id.y, id.z),
+        value_from_coord(id.x + 1u, id.y, id.z + 1u),
+        value_from_coord(id.x, id.y, id.z + 1u),
+        value_from_coord(id.x, id.y + 1u, id.z),
+        value_from_coord(id.x + 1u, id.y + 1u, id.z),
+        value_from_coord(id.x + 1u, id.y + 1u, id.z + 1u),
+        value_from_coord(id.x, id.y + 1u, id.z + 1u),
     );
 
-    return triangles;
+    var iso_level = 0.3;
+
+    var cube_index = 0u;
+
+    if (cube_corners[0].w < iso_level) { cube_index = cube_index | 1u; }
+    if (cube_corners[1].w < iso_level) { cube_index = cube_index | 2u; }
+    if (cube_corners[2].w < iso_level) { cube_index = cube_index | 4u; }
+    if (cube_corners[3].w < iso_level) { cube_index = cube_index | 8u; }
+    if (cube_corners[4].w < iso_level) { cube_index = cube_index | 16u; }
+    if (cube_corners[5].w < iso_level) { cube_index = cube_index | 32u; }
+    if (cube_corners[6].w < iso_level) { cube_index = cube_index | 64u; }
+    if (cube_corners[7].w < iso_level) { cube_index = cube_index | 128u; }
+
+    var triangle_index = 0u;
+    var triangles: array<Triangle, 5>;
+
+    for (var i = 0u; TRI_TABLE[cube_index][i] != -1; i = i + 3u) {
+        var a0 = CORNER_INDEX_A_FROM_EDGE[u32(TRI_TABLE[cube_index][i])];
+        var b0 = CORNER_INDEX_B_FROM_EDGE[u32(TRI_TABLE[cube_index][i])];
+
+        var a1 = CORNER_INDEX_A_FROM_EDGE[u32(TRI_TABLE[cube_index][i + 1u])];
+        var b1 = CORNER_INDEX_B_FROM_EDGE[u32(TRI_TABLE[cube_index][i + 1u])];
+
+        var a2 = CORNER_INDEX_A_FROM_EDGE[u32(TRI_TABLE[cube_index][i + 2u])];
+        var b2 = CORNER_INDEX_B_FROM_EDGE[u32(TRI_TABLE[cube_index][i + 2u])];
+
+        triangles[triangle_index] = Triangle(
+            interpolate_vertices(cube_corners[a0], cube_corners[b0], iso_level),
+            interpolate_vertices(cube_corners[a1], cube_corners[b1], iso_level),
+            interpolate_vertices(cube_corners[a2], cube_corners[b2], iso_level),
+        );
+
+        triangle_index = triangle_index + 1u;
+    }
+
+    output.data[index_from_id(id)] = Cube(triangle_index, triangles);
 }

@@ -307,11 +307,20 @@ struct Cube {
 };
 
 [[block]]
+struct Input {
+    chunk_size: u32;
+    position: vec3<f32>;
+};
+
+[[block]]
 struct Output {
     data: array<Cube>;
 };
 
 [[group(0), binding(0)]]
+var<storage, read> input: Input;
+
+[[group(0), binding(1)]]
 var<storage, read_write> output: Output;
 
 fn mod289vec3(x: vec3<f32>) -> vec3<f32> {
@@ -401,19 +410,23 @@ fn snoise(v: vec3<f32>) -> f32 {
 }
 
 fn interpolate_vertices(a: vec4<f32>, b: vec4<f32>, iso_level: f32) -> vec3<f32> {
-    var t = (iso_level - a.w) / (b.w - a.w);
+    // var t = (iso_level - a.w) / (b.w - a.w);
 
-    return a.xyz + t * (b.xyz - a.xyz);
+    // return a.xyz + t * (b.xyz - a.xyz);
 
-    // return (a.xyz + b.xyz) / vec3<f32>(2.0, 2.0, 2.0);
+    return (a.xyz + b.xyz) / vec3<f32>(2.0, 2.0, 2.0);
 }
 
 fn value_from_coord(x: u32, y: u32, z: u32) -> vec4<f32> {
-    return vec4<f32>(f32(x), f32(y), f32(z), snoise(vec3<f32>(f32(x), f32(y), f32(z)) / 64.0));
+    if ((vec3<f32>(f32(x), f32(y), f32(z)) + input.position).y > 0.0) {
+        return vec4<f32>(f32(x), f32(y), f32(z), 1.0);
+    }
+
+    return vec4<f32>(f32(x), f32(y), f32(z), snoise((vec3<f32>(f32(x), f32(y), f32(z)) + input.position) / (f32(input.chunk_size) / 2.0)));
 }
 
 fn index_from_id(id: vec3<u32>) -> u32 {
-    return id.z * 64u * 64u + id.y * 64u + id.x;
+    return id.z * input.chunk_size * input.chunk_size + id.y * input.chunk_size + id.x;
 }
 
 [[stage(compute), workgroup_size(8, 8, 8)]]

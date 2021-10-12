@@ -1,6 +1,7 @@
-mod marching_cubes;
 mod plugins;
+mod terrain;
 
+use crate::terrain::TerrainPlugin;
 use crevice::std140::AsStd140;
 
 use crate::plugins::{FlyCam, NoCameraPlayerPlugin};
@@ -29,16 +30,29 @@ use bevy::{
     window::WindowDescriptor,
     PipelinedDefaultPlugins,
 };
-use bytemuck;
+use bytemuck::{Pod, Zeroable};
 use noise::{NoiseFn, Perlin, Seedable};
 
 use futures_lite::future;
 
-use crate::marching_cubes::*;
-
 use bevy_inspector_egui::WorldInspectorPlugin;
 
 pub struct WorldMesh;
+
+#[repr(C)]
+#[derive(Debug, AsStd140, Copy, Clone, Zeroable, Pod)]
+pub struct Triangle {
+    pub a: Vec3,
+    pub b: Vec3,
+    pub c: Vec3,
+}
+
+#[repr(C)]
+#[derive(Debug, AsStd140, Copy, Clone, Zeroable, Pod)]
+pub struct Cube {
+    pub triangle_count: u32,
+    pub triangles: [Triangle; 5],
+}
 
 fn main() {
     let perlin = Perlin::new();
@@ -64,161 +78,10 @@ fn main() {
         .add_plugins(PipelinedDefaultPlugins)
         .add_plugin(WorldInspectorPlugin::new())
         .add_plugin(NoCameraPlayerPlugin)
-        // .add_startup_system(setup)
-        .add_startup_system(gpu_setup)
-        // .add_system(update)
-        .add_system(gpu_update)
+        .add_plugin(TerrainPlugin)
+        // .add_startup_system(gpu_setup)
+        // .add_system(gpu_update)
         .run();
-}
-
-fn value_from_noise(noise: noise::Perlin, translation: Vec3) -> f32 {
-    1.0 - (noise.get([
-        translation.x as f64 / 50.0,
-        translation.y as f64 / 50.0,
-        translation.z as f64 / 50.0,
-    ]) * 2.0) as f32
-}
-
-fn generate_triangles(perlin: &noise::Perlin, translation_offset: Vec3) -> Vec<Triangle> {
-    let mut triangles: Vec<Triangle> = Vec::new();
-
-    let cell_size = 2.5;
-    let iso_level = 0.7;
-
-    let number_of_cells = 20;
-
-    let perlin = *perlin;
-
-    for z in 0..number_of_cells {
-        for y in 0..number_of_cells {
-            for x in 0..number_of_cells {
-                let translation = Vec3::new(
-                    x as f32 * cell_size - number_of_cells as f32 / 2.0 * cell_size
-                        + cell_size / 2.0,
-                    y as f32 * cell_size - number_of_cells as f32 / 2.0 * cell_size
-                        + cell_size / 2.0,
-                    z as f32 * cell_size - number_of_cells as f32 / 2.0 * cell_size
-                        + cell_size / 2.0,
-                );
-
-                let cell_points = [
-                    translation + Vec3::new(-cell_size / 2.0, -cell_size / 2.0, -cell_size / 2.0),
-                    translation + Vec3::new(cell_size / 2.0, -cell_size / 2.0, -cell_size / 2.0),
-                    translation + Vec3::new(cell_size / 2.0, -cell_size / 2.0, cell_size / 2.0),
-                    translation + Vec3::new(-cell_size / 2.0, -cell_size / 2.0, cell_size / 2.0),
-                    translation + Vec3::new(-cell_size / 2.0, cell_size / 2.0, -cell_size / 2.0),
-                    translation + Vec3::new(cell_size / 2.0, cell_size / 2.0, -cell_size / 2.0),
-                    translation + Vec3::new(cell_size / 2.0, cell_size / 2.0, cell_size / 2.0),
-                    translation + Vec3::new(-cell_size / 2.0, cell_size / 2.0, cell_size / 2.0),
-                ];
-
-                let cell_points = [
-                    (
-                        cell_points[0],
-                        value_from_noise(perlin, cell_points[0] + translation_offset),
-                    ),
-                    (
-                        cell_points[1],
-                        value_from_noise(perlin, cell_points[1] + translation_offset),
-                    ),
-                    (
-                        cell_points[2],
-                        value_from_noise(perlin, cell_points[2] + translation_offset),
-                    ),
-                    (
-                        cell_points[3],
-                        value_from_noise(perlin, cell_points[3] + translation_offset),
-                    ),
-                    (
-                        cell_points[4],
-                        value_from_noise(perlin, cell_points[4] + translation_offset),
-                    ),
-                    (
-                        cell_points[5],
-                        value_from_noise(perlin, cell_points[5] + translation_offset),
-                    ),
-                    (
-                        cell_points[6],
-                        value_from_noise(perlin, cell_points[6] + translation_offset),
-                    ),
-                    (
-                        cell_points[7],
-                        value_from_noise(perlin, cell_points[7] + translation_offset),
-                    ),
-                ];
-                triangles.append(&mut polygonise(cell_points, iso_level));
-            }
-        }
-    }
-
-    triangles
-}
-
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    perlin: Res<Perlin>,
-) {
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
-
-    let triangles = generate_triangles(&perlin, Vec3::ZERO);
-
-    let vertices = triangles
-        .iter()
-        .map(|triangle| [triangle.a, triangle.b, triangle.c])
-        .flatten()
-        .map(|vector| [vector.x, vector.y, vector.z])
-        .collect::<Vec<_>>();
-    let indices = (0..vertices.len())
-        .map(|index| index as u32)
-        .collect::<Vec<u32>>();
-    let uvs = (0..vertices.len())
-        .map(|_| [0.0, 0.0])
-        .collect::<Vec<[f32; 2]>>();
-
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-
-    for triangle in indices.chunks(3) {
-        let a = Vec3::from(vertices[(triangle)[0] as usize]);
-        let b = Vec3::from(vertices[(triangle)[1] as usize]);
-        let c = Vec3::from(vertices[(triangle)[2] as usize]);
-
-        let normal = (b - a).cross(c - a).normalize();
-
-        normals.push(normal.into());
-        normals.push(normal.into());
-        normals.push(normal.into());
-    }
-
-    mesh.set_indices(Some(Indices::U32(indices)));
-
-    mesh.set_attribute(Mesh::ATTRIBUTE_POSITION, vertices);
-    mesh.set_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.set_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-
-    commands
-        .spawn_bundle(PbrBundle {
-            mesh: meshes.add(mesh),
-            material: materials.add(StandardMaterial {
-                base_color: Color::BLUE,
-                ..Default::default()
-            }),
-            ..Default::default()
-        })
-        .insert(WorldMesh);
-
-    commands.insert_resource(AmbientLight {
-        color: Color::WHITE,
-        brightness: 1.0,
-    });
-
-    commands
-        .spawn_bundle(PerspectiveCameraBundle {
-            transform: Transform::from_xyz(-40.0, 40.0, 40.0).looking_at(Vec3::ZERO, Vec3::Y),
-            ..Default::default()
-        })
-        .insert(FlyCam);
 }
 
 fn gpu_setup(
@@ -322,6 +185,18 @@ fn gpu_setup(
     commands.spawn().insert(task);
 
     *read_buffer_option = Some(read_buffer);
+
+    commands.insert_resource(AmbientLight {
+        color: Color::WHITE,
+        brightness: 1.0,
+    });
+
+    commands
+        .spawn_bundle(PerspectiveCameraBundle {
+            transform: Transform::from_xyz(-40.0, 40.0, 40.0).looking_at(Vec3::ZERO, Vec3::Y),
+            ..Default::default()
+        })
+        .insert(FlyCam);
 }
 
 fn gpu_update(
@@ -397,19 +272,6 @@ fn gpu_update(
                     })
                     .insert(WorldMesh);
 
-                commands.insert_resource(AmbientLight {
-                    color: Color::WHITE,
-                    brightness: 1.0,
-                });
-
-                commands
-                    .spawn_bundle(PerspectiveCameraBundle {
-                        transform: Transform::from_xyz(-40.0, 40.0, 40.0)
-                            .looking_at(Vec3::ZERO, Vec3::Y),
-                        ..Default::default()
-                    })
-                    .insert(FlyCam);
-
                 drop(data);
                 buffer.unmap();
             }
@@ -419,55 +281,4 @@ fn gpu_update(
                 .remove::<Task<Result<(), BufferAsyncError>>>();
         }
     }
-}
-
-fn update(
-    time: Res<Time>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut query: Query<&mut Handle<Mesh>, With<WorldMesh>>,
-    perlin: Res<Perlin>,
-) {
-    for mesh in &mut query.iter_mut() {
-        let mesh = meshes.get_mut(&*mesh).unwrap();
-
-        let triangles = generate_triangles(
-            &perlin,
-            time.seconds_since_startup() as f32 * Vec3::new(10.0, 10.0, 10.0),
-        );
-
-        let vertices = triangles
-            .iter()
-            .map(|triangle| [triangle.a, triangle.b, triangle.c])
-            .flatten()
-            .map(|vector| [vector.x, vector.y, vector.z])
-            .collect::<Vec<_>>();
-        let indices = (0..vertices.len())
-            .map(|index| index as u32)
-            .collect::<Vec<u32>>();
-        let uvs = (0..vertices.len())
-            .map(|_| [0.0, 0.0])
-            .collect::<Vec<[f32; 2]>>();
-
-        let mut normals: Vec<[f32; 3]> = Vec::new();
-
-        for triangle in indices.chunks(3) {
-            let a = Vec3::from(vertices[(triangle)[0] as usize]);
-            let b = Vec3::from(vertices[(triangle)[1] as usize]);
-            let c = Vec3::from(vertices[(triangle)[2] as usize]);
-
-            let normal = (b - a).cross(c - a).normalize();
-
-            normals.push(normal.into());
-            normals.push(normal.into());
-            normals.push(normal.into());
-        }
-
-        mesh.set_indices(Some(Indices::U32(indices)));
-
-        mesh.set_attribute(Mesh::ATTRIBUTE_POSITION, vertices);
-        mesh.set_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-        mesh.set_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    }
-
-    time.delta_seconds();
 }

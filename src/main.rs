@@ -6,6 +6,10 @@ use crate::{
     plugins::{FlyCam, NoCameraPlayerPlugin},
     terrain::TerrainPlugin,
 };
+use bevy::{
+    pbr2::{DirectionalLight, DirectionalLightBundle},
+    render2::camera::OrthographicProjection,
+};
 
 use bevy::{
     app::App,
@@ -54,4 +58,21 @@ fn setup_environment(mut commands: Commands) {
             ..Default::default()
         })
         .insert(FlyCam);
+
+    commands.spawn_bundle(DirectionalLightBundle {
+        directional_light: DirectionalLight {
+            illuminance: 100000.0,
+            shadow_projection: OrthographicProjection {
+                left: -10.0,
+                right: 10.0,
+                bottom: -10.0,
+                top: 10.0,
+                near: -50.0,
+                far: 50.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    });
 }

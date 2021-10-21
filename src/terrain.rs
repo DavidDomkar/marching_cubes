@@ -1,20 +1,37 @@
-use crate::marching_cubes::{polygonise, Triangle};
-use bevy::{core::Time, render2::mesh::shape::Cube};
+use crate::marching_cubes::{polygonise, Triangle as OtherTriangle};
+use bevy::render2::render_resource::{
+    BindGroupDescriptor, BindGroupEntry, CommandEncoderDescriptor, ComputePassDescriptor,
+};
+
+use bytemuck::{Pod, Zeroable};
+
+use crevice::std140::AsStd140;
 
 use bevy::{
     app::{App, Plugin},
     asset::Assets,
+    core::{bytes_of, Time},
     ecs::{
         entity::Entity,
+        schedule::SystemLabel,
         system::{Commands, Query, Res, ResMut},
+        world::{FromWorld, World},
     },
     math::Vec3,
     pbr2::{PbrBundle, StandardMaterial},
+    prelude::ParallelSystemDescriptorCoercion,
     render2::{
         camera::Camera,
         color::Color,
-        mesh::{shape::Plane, Indices, Mesh},
-        render_resource::PrimitiveTopology,
+        mesh::{Indices, Mesh},
+        render_resource::{
+            BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType,
+            BufferAddress, BufferBindingType, BufferDescriptor, BufferInitDescriptor, BufferUsages,
+            ComputePipeline, ComputePipelineDescriptor, MapMode, PipelineLayoutDescriptor,
+            PrimitiveTopology, ShaderStages,
+        },
+        renderer::{RenderDevice, RenderQueue},
+        shader::Shader,
     },
     tasks::{AsyncComputeTaskPool, Task},
     transform::components::Transform,
@@ -26,12 +43,39 @@ use noise::{NoiseFn, Perlin, Seedable, SuperSimplex};
 
 use futures_lite::future;
 
+#[derive(Debug, Hash, PartialEq, Eq, Clone, SystemLabel)]
+enum TerrainSystemLabels {
+    UpdateChunks,
+}
+
+#[repr(C)]
+#[derive(Debug, AsStd140, Copy, Clone, Zeroable, Pod)]
+struct Triangle {
+    pub a: Vec3,
+    pub b: Vec3,
+    pub c: Vec3,
+}
+
+#[repr(C)]
+#[derive(Debug, AsStd140, Copy, Clone, Zeroable, Pod)]
+struct Cube {
+    pub triangle_count: u32,
+    pub triangles: [Triangle; 5],
+}
+
+#[repr(C)]
+#[derive(Debug, AsStd140, Copy, Clone, Zeroable, Pod)]
+struct InputBuffer {
+    pub chunk_size: u32,
+    pub position: Vec3,
+}
+
 pub struct TerrainPlugin;
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Terrain::new());
-        app.add_system(update_chunks);
-        app.add_system(handle_terrain_chunk_tasks);
+        app.add_system(update_chunks.label(TerrainSystemLabels::UpdateChunks));
+        app.add_system(handle_terrain_chunk_tasks.after(TerrainSystemLabels::UpdateChunks));
     }
 }
 
@@ -44,7 +88,7 @@ struct Terrain {
 impl Terrain {
     fn new() -> Self {
         Self {
-            chunk_view_distance: 5,
+            chunk_view_distance: 10,
             chunk_size: 64,
             chunks: HashMap::new(),
         }
@@ -82,9 +126,9 @@ pub struct TerrainChunk {
 impl TerrainChunk {
     fn value_from_noise(noise: SuperSimplex, translation: Vec3) -> f32 {
         1.0 - (noise.get([
-            translation.x as f64 / 16.0,
-            translation.y as f64 / 16.0,
-            translation.z as f64 / 16.0,
+            translation.x as f64 / 32.0,
+            translation.y as f64 / 32.0,
+            translation.z as f64 / 32.0,
         ]) * 2.0) as f32
     }
 
@@ -95,7 +139,7 @@ impl TerrainChunk {
 
         let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
 
-        let mut triangles: Vec<Triangle> = Vec::new();
+        let mut triangles: Vec<OtherTriangle> = Vec::new();
 
         let cell_size = 1.0;
         let iso_level = 0.7;
@@ -212,10 +256,11 @@ impl TerrainChunk {
 fn update_chunks(
     mut commands: Commands,
     mut terrain: ResMut<Terrain>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
     task_pool: Res<AsyncComputeTaskPool>,
-    time: Res<Time>,
     camera_query: Query<(&Camera, &Transform)>,
-    mut terrain_chunks_query: Query<(Entity, &TerrainChunk)>,
+    terrain_chunks_query: Query<(Entity, &TerrainChunk)>,
 ) {
     let mut visible_chunk_coords: HashSet<(i32, i32, i32)> = HashSet::new();
 
@@ -315,11 +360,188 @@ fn update_chunks(
     let chunk_size = terrain.chunk_size;
 
     for (x, y, z) in visible_chunk_coords {
+        let render_device = render_device.clone();
+        let render_queue = render_queue.clone();
+
         let task = task_pool.spawn(async move {
-            let mesh = TerrainChunk::generate_mesh((x, y, z), chunk_size);
+            let buffer_size =
+                (chunk_size * chunk_size * chunk_size * (Cube::std140_size_static() as u32))
+                    as BufferAddress;
+
+            let shader = Shader::from_wgsl(include_str!("../assets/chunk.wgsl"));
+            let shader_module = render_device.create_shader_module(&shader);
+
+            let input_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+                contents: bytes_of(
+                    &InputBuffer {
+                        chunk_size: chunk_size,
+                        position: Vec3::new(
+                            x as f32 * chunk_size as f32 - (chunk_size as f32 / 2.0),
+                            y as f32 * chunk_size as f32 - (chunk_size as f32 / 2.0),
+                            z as f32 * chunk_size as f32 - (chunk_size as f32 / 2.0),
+                        ),
+                    }
+                    .as_std140(),
+                ),
+                label: None,
+                usage: BufferUsages::STORAGE,
+            });
+
+            let output_buffer = render_device.create_buffer(&BufferDescriptor {
+                label: None,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+                size: buffer_size,
+            });
+
+            let bind_group_layout =
+                render_device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                    label: None,
+                    entries: &[
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: ShaderStages::COMPUTE,
+                            ty: BindingType::Buffer {
+                                ty: BufferBindingType::Storage { read_only: false },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+            let pipeline_layout = render_device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: None,
+                push_constant_ranges: &[],
+                bind_group_layouts: &[&bind_group_layout],
+            });
+
+            let compute_pipeline =
+                render_device.create_compute_pipeline(&ComputePipelineDescriptor {
+                    label: None,
+                    layout: Some(&pipeline_layout),
+                    module: &shader_module,
+                    entry_point: "main",
+                });
+
+            let bind_group = render_device.create_bind_group(&BindGroupDescriptor {
+                label: None,
+                layout: &bind_group_layout,
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: input_buffer.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: output_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
+            let mut command_encoder =
+                render_device.create_command_encoder(&CommandEncoderDescriptor { label: None });
+
+            {
+                let mut compute_pass =
+                    command_encoder.begin_compute_pass(&ComputePassDescriptor { label: None });
+                compute_pass.set_pipeline(&compute_pipeline);
+                compute_pass.set_bind_group(0, &*bind_group, &[]);
+
+                compute_pass.dispatch(chunk_size / 8, chunk_size / 8, chunk_size / 8);
+            }
+
+            let buffer = render_device.create_buffer(&BufferDescriptor {
+                label: None,
+                usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+                size: buffer_size,
+            });
+
+            command_encoder.copy_buffer_to_buffer(&output_buffer, 0, &buffer, 0, buffer_size);
+
+            let gpu_commands = command_encoder.finish();
+
+            render_queue.submit([gpu_commands]);
+
+            let buffer_slice = buffer.slice(..);
+
+            let buffer_future = buffer_slice.map_async(MapMode::Read);
+
+            let result = buffer_future.await;
+
+            let mut triangles: Vec<Triangle> = Vec::new();
+
+            if let Ok(_) = result {
+                let buffer_data = buffer_slice.get_mapped_range();
+
+                let cubes: &[Std140Cube] = bytemuck::cast_slice(&buffer_data);
+
+                for cube in cubes.iter() {
+                    let cube = Cube::from_std140(*cube);
+
+                    for i in 0..cube.triangle_count {
+                        triangles.push(cube.triangles[i as usize]);
+                    }
+                }
+
+                drop(buffer_data);
+            }
+
+            buffer.unmap();
+            buffer.destroy();
+
+            let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
+
+            let vertices = triangles
+                .iter()
+                .map(|triangle| [triangle.a, triangle.b, triangle.c])
+                .flatten()
+                .map(|vector| [vector.x, vector.y, vector.z])
+                .collect::<Vec<_>>();
+            let indices = (0..vertices.len())
+                .map(|index| index as u32)
+                .collect::<Vec<u32>>();
+            let uvs = (0..vertices.len())
+                .map(|_| [0.0, 0.0])
+                .collect::<Vec<[f32; 2]>>();
+
+            let mut normals: Vec<[f32; 3]> = Vec::new();
+
+            for triangle in indices.chunks(3) {
+                let a = Vec3::from(vertices[(triangle)[0] as usize]);
+                let b = Vec3::from(vertices[(triangle)[1] as usize]);
+                let c = Vec3::from(vertices[(triangle)[2] as usize]);
+
+                let normal = (b - a).cross(c - a).normalize();
+
+                normals.push(normal.into());
+                normals.push(normal.into());
+                normals.push(normal.into());
+            }
+
+            mesh.set_indices(Some(Indices::U32(indices)));
+
+            mesh.set_attribute(Mesh::ATTRIBUTE_POSITION, vertices);
+            mesh.set_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+            mesh.set_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+
+            // let mesh = TerrainChunk::generate_mesh((x, y, z), chunk_size);
 
             let material = StandardMaterial {
                 base_color: Color::BLUE,
+                perceptual_roughness: 1.0,
                 ..Default::default()
             };
 

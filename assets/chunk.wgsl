@@ -418,9 +418,9 @@ fn interpolate_vertices(a: vec4<f32>, b: vec4<f32>, iso_level: f32) -> vec3<f32>
 }
 
 fn value_from_coord(x: u32, y: u32, z: u32) -> vec4<f32> {
-    if ((vec3<f32>(f32(x), f32(y), f32(z)) + input.position).y > 0.0) {
-        return vec4<f32>(f32(x), f32(y), f32(z), 1.0);
-    }
+    // if ((vec3<f32>(f32(x), f32(y), f32(z)) + input.position).y > 0.0) {
+    //     return vec4<f32>(f32(x), f32(y), f32(z), 1.0);
+    // }
 
     return vec4<f32>(f32(x), f32(y), f32(z), snoise((vec3<f32>(f32(x), f32(y), f32(z)) + input.position) / (f32(input.chunk_size) / 2.0)));
 }

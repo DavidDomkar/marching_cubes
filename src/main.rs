@@ -1,3 +1,4 @@
+mod marching_cubes;
 mod plugins;
 mod terrain;
 

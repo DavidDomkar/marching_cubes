@@ -208,7 +208,10 @@ impl Chunk {
         let buffer_slice = self.buffer.slice(..);
 
         let buffer_future = buffer_slice.map_async(MapMode::Read);
-        let task = task_pool.spawn(buffer_future);
+
+        let task_future = async move { buffer_future.await };
+
+        let task = task_pool.spawn(task_future);
 
         task
     }

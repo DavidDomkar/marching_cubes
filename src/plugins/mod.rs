@@ -1,20 +1,13 @@
-use bevy::render2::camera::PerspectiveCameraBundle;
-use bevy::ecs::system::Commands;
-use bevy::window::Window;
-use bevy::ecs::system::ResMut;
-use bevy::math::Quat;
-use bevy::math::Vec3;
-use bevy::transform::components::Transform;
-use bevy::ecs::system::Query;
-use bevy::window::Windows;
-use bevy::core::Time;
-use bevy::input::keyboard::KeyCode;
-use bevy::input::Input;
-use bevy::ecs::system::Res;
-use bevy::app::App;
-use bevy::app::Plugin;
-use bevy::app::{Events, ManualEventReader};
-use bevy::input::mouse::MouseMotion;
+use bevy::{
+    app::{App, Events, ManualEventReader, Plugin},
+    core::Time,
+    ecs::system::{Commands, Query, Res, ResMut},
+    input::{keyboard::KeyCode, mouse::MouseMotion, Input},
+    math::{Quat, Vec3},
+    render2::camera::PerspectiveCameraBundle,
+    transform::components::Transform,
+    window::{Window, Windows},
+};
 
 /// Keeps track of mouse motion events, pitch, and yaw
 #[derive(Default)]
@@ -34,7 +27,7 @@ impl Default for MovementSettings {
     fn default() -> Self {
         Self {
             sensitivity: 0.00012,
-            speed: 12.,
+            speed: 64.,
         }
     }
 }

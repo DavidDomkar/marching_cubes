@@ -1,4 +1,5 @@
 use crate::marching_cubes::{polygonise, Triangle};
+use bevy::{core::Time, render2::mesh::shape::Cube};
 
 use bevy::{
     app::{App, Plugin},
@@ -21,7 +22,7 @@ use bevy::{
 
 use std::collections::{HashMap, HashSet};
 
-use noise::{NoiseFn, OpenSimplex, Perlin, Seedable};
+use noise::{NoiseFn, Perlin, Seedable, SuperSimplex};
 
 use futures_lite::future;
 
@@ -37,57 +38,58 @@ impl Plugin for TerrainPlugin {
 struct Terrain {
     chunk_view_distance: u32,
     chunk_size: u32,
-    chunks: HashMap<(i32, i32), Entity>,
+    chunks: HashMap<(i32, i32, i32), Entity>,
 }
 
 impl Terrain {
     fn new() -> Self {
         Self {
-            chunk_view_distance: 20,
+            chunk_view_distance: 5,
             chunk_size: 64,
             chunks: HashMap::new(),
         }
     }
 
-    fn get_chunk_coords_at_translation(&self, translation: &Vec3) -> (i32, i32) {
+    fn get_chunk_coords_at_translation(&self, translation: &Vec3) -> (i32, i32, i32) {
         (
             (translation.x / self.chunk_size as f32).round() as i32,
+            (translation.y / self.chunk_size as f32).round() as i32,
             (translation.z / self.chunk_size as f32).round() as i32,
         )
     }
 
-    fn get_chunk(&self, x: i32, z: i32) -> Option<&Entity> {
-        self.chunks.get(&(x, z))
+    fn get_chunk(&self, x: i32, y: i32, z: i32) -> Option<&Entity> {
+        self.chunks.get(&(x, y, z))
     }
 
-    fn has_chunk(&self, x: i32, z: i32) -> bool {
-        self.chunks.contains_key(&(x, z))
+    fn has_chunk(&self, x: i32, y: i32, z: i32) -> bool {
+        self.chunks.contains_key(&(x, y, z))
     }
 
-    fn set_chunk(&mut self, x: i32, z: i32, chunk: Entity) {
-        self.chunks.insert((x, z), chunk);
+    fn set_chunk(&mut self, x: i32, y: i32, z: i32, chunk: Entity) {
+        self.chunks.insert((x, y, z), chunk);
     }
 
-    fn remove_chunk(&mut self, x: i32, z: i32) {
-        self.chunks.remove(&(x, z));
+    fn remove_chunk(&mut self, x: i32, y: i32, z: i32) {
+        self.chunks.remove(&(x, y, z));
     }
 }
 
 pub struct TerrainChunk {
-    coords: (i32, i32),
+    coords: (i32, i32, i32),
 }
 
 impl TerrainChunk {
-    fn value_from_noise(noise: Perlin, translation: Vec3) -> f32 {
+    fn value_from_noise(noise: SuperSimplex, translation: Vec3) -> f32 {
         1.0 - (noise.get([
-            translation.x as f64 / 100.0,
-            translation.y as f64 / 100.0,
-            translation.z as f64 / 100.0,
+            translation.x as f64 / 16.0,
+            translation.y as f64 / 16.0,
+            translation.z as f64 / 16.0,
         ]) * 2.0) as f32
     }
 
-    fn generate_mesh(chunk_coords: (i32, i32), chunk_size: u32) -> Mesh {
-        let noise = Perlin::new();
+    fn generate_mesh(chunk_coords: (i32, i32, i32), chunk_size: u32) -> Mesh {
+        let noise = SuperSimplex::new();
 
         noise.set_seed(5225);
 
@@ -100,8 +102,8 @@ impl TerrainChunk {
 
         let translation_offset = Vec3::new(
             chunk_coords.0 as f32 * chunk_size as f32 - chunk_size as f32 / 2.0,
-            0.0,
             chunk_coords.1 as f32 * chunk_size as f32 - chunk_size as f32 / 2.0,
+            chunk_coords.2 as f32 * chunk_size as f32 - chunk_size as f32 / 2.0,
         );
 
         for z in 0..chunk_size {
@@ -211,40 +213,96 @@ fn update_chunks(
     mut commands: Commands,
     mut terrain: ResMut<Terrain>,
     task_pool: Res<AsyncComputeTaskPool>,
+    time: Res<Time>,
     camera_query: Query<(&Camera, &Transform)>,
-    terrain_chunks_query: Query<(Entity, &TerrainChunk)>,
+    mut terrain_chunks_query: Query<(Entity, &TerrainChunk)>,
 ) {
-    let mut visible_chunk_coords: HashSet<(i32, i32)> = HashSet::new();
+    let mut visible_chunk_coords: HashSet<(i32, i32, i32)> = HashSet::new();
 
     for (_, transform) in camera_query.iter() {
-        let (center_x, center_z) = terrain.get_chunk_coords_at_translation(&transform.translation);
+        let (center_x, center_y, center_z) =
+            terrain.get_chunk_coords_at_translation(&transform.translation);
 
         let chunk_view_distance = terrain.chunk_view_distance as i32;
 
-        for z in -chunk_view_distance..chunk_view_distance + 1 {
-            let mut x = 0;
+        for y in -chunk_view_distance..chunk_view_distance + 1 {
+            let mut z = 0;
 
-            visible_chunk_coords.insert((center_x + x, center_z + z));
+            {
+                let mut x = 0;
+
+                visible_chunk_coords.insert((center_x, center_y + y, center_z));
+
+                x += 1;
+
+                loop {
+                    let cubic_distance_from_center = x * x + z * z + y * y;
+                    let squared_view_distance = chunk_view_distance * chunk_view_distance;
+                    if cubic_distance_from_center > squared_view_distance {
+                        break;
+                    }
+
+                    visible_chunk_coords.insert((center_x + x, center_y + y, center_z));
+                    visible_chunk_coords.insert((center_x - x, center_y + y, center_z));
+
+                    x += 1;
+                }
+            }
+
+            z += 1;
 
             loop {
-                let squared_distance_from_center = z * z + x * x;
+                let squared_distance_from_center = z * z + y * y;
                 let squared_view_distance = chunk_view_distance * chunk_view_distance;
-
                 if squared_distance_from_center > squared_view_distance {
                     break;
                 }
 
-                visible_chunk_coords.insert((center_x + x, center_z + z));
-                visible_chunk_coords.insert((center_x - x, center_z + z));
+                {
+                    let mut x = 0;
+                    visible_chunk_coords.insert((center_x + x, center_y + y, center_z + z));
+                    x += 1;
+                    loop {
+                        let cubic_distance_from_center = x * x + z * z + y * y;
+                        let squared_view_distance = chunk_view_distance;
+                        if cubic_distance_from_center > squared_view_distance {
+                            break;
+                        }
 
-                x += 1;
+                        visible_chunk_coords.insert((center_x + x, center_y + y, center_z + z));
+                        visible_chunk_coords.insert((center_x - x, center_y + y, center_z + z));
+                        x += 1;
+                    }
+                }
+
+                {
+                    let mut x = 0;
+                    visible_chunk_coords.insert((center_x + x, center_y + y, center_z - z));
+                    x += 1;
+                    loop {
+                        let cubic_distance_from_center = x * x + z * z + y * y;
+                        let squared_view_distance = chunk_view_distance;
+                        if cubic_distance_from_center > squared_view_distance {
+                            break;
+                        }
+                        visible_chunk_coords.insert((center_x + x, center_y + y, center_z - z));
+                        visible_chunk_coords.insert((center_x - x, center_y + y, center_z - z));
+                        x += 1;
+                    }
+                }
+
+                z += 1;
             }
         }
     }
 
     for (entity, terrain_chunk) in terrain_chunks_query.iter() {
         if !visible_chunk_coords.contains(&terrain_chunk.coords) {
-            terrain.remove_chunk(terrain_chunk.coords.0, terrain_chunk.coords.1);
+            terrain.remove_chunk(
+                terrain_chunk.coords.0,
+                terrain_chunk.coords.1,
+                terrain_chunk.coords.2,
+            );
 
             let mut entity = commands.entity(entity);
 
@@ -256,9 +314,9 @@ fn update_chunks(
 
     let chunk_size = terrain.chunk_size;
 
-    for (x, z) in visible_chunk_coords {
+    for (x, y, z) in visible_chunk_coords {
         let task = task_pool.spawn(async move {
-            let mesh = TerrainChunk::generate_mesh((x, z), chunk_size);
+            let mesh = TerrainChunk::generate_mesh((x, y, z), chunk_size);
 
             let material = StandardMaterial {
                 base_color: Color::BLUE,
@@ -270,11 +328,11 @@ fn update_chunks(
 
         let chunk_entity = commands
             .spawn()
-            .insert(TerrainChunk { coords: (x, z) })
+            .insert(TerrainChunk { coords: (x, y, z) })
             .insert(task)
             .id();
 
-        terrain.set_chunk(x, z, chunk_entity);
+        terrain.set_chunk(x, y, z, chunk_entity);
     }
 }
 
@@ -289,20 +347,22 @@ fn handle_terrain_chunk_tasks(
         if let Some((mesh, material)) = future::block_on(future::poll_once(&mut *task)) {
             let material = materials.add(material);
 
-            commands.entity(entity).insert_bundle(PbrBundle {
-                mesh: meshes.add(mesh),
-                material: material.clone(),
-                transform: Transform::from_xyz(
-                    chunk.coords.0 as f32 * terrain.chunk_size as f32,
-                    0.0,
-                    chunk.coords.1 as f32 * terrain.chunk_size as f32,
-                ),
-                ..Default::default()
-            });
+            if terrain.has_chunk(chunk.coords.0, chunk.coords.1, chunk.coords.2) {
+                commands.entity(entity).insert_bundle(PbrBundle {
+                    mesh: meshes.add(mesh),
+                    material: material.clone(),
+                    transform: Transform::from_xyz(
+                        chunk.coords.0 as f32 * terrain.chunk_size as f32,
+                        chunk.coords.1 as f32 * terrain.chunk_size as f32,
+                        chunk.coords.2 as f32 * terrain.chunk_size as f32,
+                    ),
+                    ..Default::default()
+                });
 
-            commands
-                .entity(entity)
-                .remove::<Task<(Mesh, StandardMaterial)>>();
+                commands
+                    .entity(entity)
+                    .remove::<Task<(Mesh, StandardMaterial)>>();
+            }
         }
     }
 }
